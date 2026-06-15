@@ -81,7 +81,11 @@ def clean_reply(text: str) -> str:
     # ลบบรรทัดว่างซ้ำ
     text = re.sub(r'\n{3,}', '\n\n', text)
     # แทน "ผม" ด้วย "น้อง Admin"
-    text = re.sub(r'ผม', 'น้อง Admin', text)
+    text = text.replace('ผม', 'น้อง Admin')
+    # แทน "ครับ" ด้วย "ค่ะ"
+    text = text.replace('ครับ', 'ค่ะ')
+    # ลบ # ทุกตัวที่เหลือ (กัน edge case)
+    text = text.replace('#', '')
     return text.strip()
 
 
