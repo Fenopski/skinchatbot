@@ -80,6 +80,8 @@ def clean_reply(text: str) -> str:
     text = re.sub(r'^-{2,}$', '', text, flags=re.MULTILINE)
     # ลบบรรทัดว่างซ้ำ
     text = re.sub(r'\n{3,}', '\n\n', text)
+    # แทน "ผม" ด้วย "น้อง Admin"
+    text = re.sub(r'ผม', 'น้อง Admin', text)
     return text.strip()
 
 
