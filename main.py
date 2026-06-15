@@ -65,6 +65,21 @@ conversation_histories: dict[str, list] = {}
 MAX_HISTORY = 10
 
 
+def clean_reply(text: str) -> str:
+    """ลบ Markdown ออกจากคำตอบก่อนส่งให้ LINE"""
+    import re
+    # ลบ # ที่ขึ้นต้นบรรทัด
+    text = re.sub(r'^#{1,6}\s*', '', text, flags=re.MULTILINE)
+    # ลบ ** และ * รอบข้อความ
+    text = re.sub(r'\*{1,2}([^*]+)\*{1,2}', r'\1', text)
+    # ลบตาราง Markdown (บรรทัดที่มี |)
+    text = re.sub(r'^\|.*\|$', '', text, flags=re.MULTILINE)
+    text = re.sub(r'^[-|]+$', '', text, flags=re.MULTILINE)
+    # ลบบรรทัดว่างซ้ำ
+    text = re.sub(r'\n{3,}', '\n\n', text)
+    return text.strip()
+
+
 def ask_claude(user_id: str, user_message: str) -> str:
     """ส่งคำถามพร้อมประวัติการสนทนาให้ Claude และรับคำตอบกลับ"""
     if user_id not in conversation_histories:
@@ -79,7 +94,7 @@ def ask_claude(user_id: str, user_message: str) -> str:
         system=SYSTEM_PROMPT,
         messages=history,
     )
-    reply = response.content[0].text
+    reply = clean_reply(response.content[0].text)
     history.append({"role": "assistant", "content": reply})
 
     # จำกัดประวัติไม่เกิน MAX_HISTORY รอบ (กัน token เกิน)
