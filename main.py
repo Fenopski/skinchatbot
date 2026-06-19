@@ -78,9 +78,10 @@ def clean_reply(text: str) -> str:
     text = re.sub(r'^#{1,6}\s*', '', text, flags=re.MULTILINE)
     # ลบ ** และ * ทุกตัวในข้อความ (aggressive)
     text = text.replace('**', '').replace('*', '')
-    # ลบตาราง Markdown
-    text = re.sub(r'^\|.*\|$', '', text, flags=re.MULTILINE)
-    text = re.sub(r'^[-|: ]+$', '', text, flags=re.MULTILINE)
+    # ลบตาราง Markdown — ลบทุกบรรทัดที่มี |
+    text = re.sub(r'^.*\|.*$', '', text, flags=re.MULTILINE)
+    # ลบ | ที่เหลือทั้งหมด
+    text = text.replace('|', '')
     # ลบ --- ที่เป็น divider
     text = re.sub(r'^-{2,}$', '', text, flags=re.MULTILINE)
     # ลบบรรทัดว่างซ้ำ
