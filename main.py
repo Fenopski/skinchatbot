@@ -16,6 +16,8 @@ from linebot.v3.webhooks import MessageEvent, TextMessageContent
 LINE_CHANNEL_SECRET = os.environ["LINE_CHANNEL_SECRET"]
 LINE_CHANNEL_ACCESS_TOKEN = os.environ["LINE_CHANNEL_ACCESS_TOKEN"]
 ANTHROPIC_API_KEY = os.environ["ANTHROPIC_API_KEY"]
+ADMIN_SECRET = os.environ.get("ADMIN_SECRET", "admin1234")
+ADMIN_USER_IDS = set(x for x in os.environ.get("ADMIN_USER_IDS", "").split(",") if x)
 
 # ─── Knowledge Base ─────────────────────────────────────────────────────────────
 KNOWLEDGE_BASE_PATH = "knowledge_base.md"
@@ -64,6 +66,9 @@ claude_client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 # เก็บประวัติการสนทนาแยกตาม user_id (สูงสุด 10 รอบ/คน)
 conversation_histories: dict[str, list] = {}
 MAX_HISTORY = 10
+
+# ─── Admin Bot Control ──────────────────────────────────────────────────────────
+bot_enabled = True  # สถานะ bot (True = เปิด, False = ปิด)
 
 
 def clean_reply(text: str) -> str:
@@ -115,7 +120,33 @@ def ask_claude(user_id: str, user_message: str) -> str:
 
 @app.get("/")
 def health_check():
-    return {"status": "LINE Bot is running"}
+    return {"status": "LINE Bot is running", "bot_enabled": bot_enabled}
+
+# ─── Admin Endpoints ────────────────────────────────────────────────────────────
+@app.get("/admin/pause")
+def admin_pause(key: str = ""):
+    global bot_enabled
+    if key != ADMIN_SECRET:
+        raise HTTPException(status_code=403, detail="Forbidden")
+    bot_enabled = False
+    return {"status": "bot หยุดทำงานแล้ว"}
+
+@app.get("/admin/resume")
+def admin_resume(key: str = ""):
+    global bot_enabled
+    if key != ADMIN_SECRET:
+        raise HTTPException(status_code=403, detail="Forbidden")
+    bot_enabled = True
+    return {"status": "bot กลับมาทำงานแล้ว"}
+
+@app.get("/admin/status")
+def admin_status(key: str = ""):
+    if key != ADMIN_SECRET:
+        raise HTTPException(status_code=403, detail="Forbidden")
+    return {
+        "bot_enabled": bot_enabled,
+        "active_users": list(conversation_histories.keys()),
+    }
 
 
 @app.post("/webhook")
@@ -129,17 +160,42 @@ async def webhook(request: Request):
     return "OK"
 
 
-@handler.add(MessageEvent, message=TextMessageContent)
-def handle_message(event: MessageEvent):
-    user_id = event.source.user_id
-    user_text = event.message.text
-    reply_text = ask_claude(user_id, user_text)
-
+def send_reply(reply_token: str, text: str):
     with ApiClient(line_config) as api_client:
         line_bot_api = MessagingApi(api_client)
         line_bot_api.reply_message_with_http_info(
             ReplyMessageRequest(
-                reply_token=event.reply_token,
-                messages=[TextMessage(text=reply_text)],
+                reply_token=reply_token,
+                messages=[TextMessage(text=text)],
             )
         )
+
+
+@handler.add(MessageEvent, message=TextMessageContent)
+def handle_message(event: MessageEvent):
+    global bot_enabled
+    user_id = event.source.user_id
+    user_text = event.message.text.strip()
+
+    # ─── Admin keyword control ────────────────────────────────────────────────
+    if user_id in ADMIN_USER_IDS:
+        if user_text == "หยุดบอท":
+            bot_enabled = False
+            send_reply(event.reply_token, "⏸ Bot หยุดทำงานแล้วค่ะ Admin สามารถตอบเองได้เลย")
+            return
+        elif user_text == "เปิดบอท":
+            bot_enabled = True
+            send_reply(event.reply_token, "▶️ Bot กลับมาทำงานแล้วค่ะ")
+            return
+        elif user_text == "สถานะ":
+            status = "เปิด ✅" if bot_enabled else "ปิด ⏸"
+            send_reply(event.reply_token, f"สถานะ Bot: {status}\nผู้ใช้งานทั้งหมด: {len(conversation_histories)} คน")
+            return
+
+    # ─── ถ้า bot ปิดอยู่ ไม่ตอบ ────────────────────────────────────────────────
+    if not bot_enabled:
+        return
+
+    # ─── ตอบปกติ ─────────────────────────────────────────────────────────────
+    reply_text = ask_claude(user_id, user_text)
+    send_reply(event.reply_token, reply_text)
