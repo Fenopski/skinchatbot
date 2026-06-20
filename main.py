@@ -191,6 +191,9 @@ def handle_message(event: MessageEvent):
     user_id = event.source.user_id
     user_text = event.message.text.strip()
 
+    # แสดง user_id ใน log
+    print(f"[USER_ID] {user_id}: {user_text[:20]}")
+
     # ─── Admin keyword control ────────────────────────────────────────────────
     if user_id in ADMIN_USER_IDS:
         if user_text == "หยุดบอท":
