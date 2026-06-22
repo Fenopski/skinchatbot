@@ -1,6 +1,11 @@
 import os
+import hashlib
+import hmac
+import json
 import anthropic
+import httpx
 from fastapi import FastAPI, Request, HTTPException
+from fastapi.responses import PlainTextResponse
 from linebot.v3 import WebhookHandler
 from linebot.v3.exceptions import InvalidSignatureError
 from linebot.v3.messaging import (
@@ -18,6 +23,12 @@ LINE_CHANNEL_ACCESS_TOKEN = os.environ["LINE_CHANNEL_ACCESS_TOKEN"]
 ANTHROPIC_API_KEY = os.environ["ANTHROPIC_API_KEY"]
 ADMIN_SECRET = os.environ.get("ADMIN_SECRET", "admin1234")
 ADMIN_USER_IDS = set(x for x in os.environ.get("ADMIN_USER_IDS", "").split(",") if x)
+
+# ─── Facebook Config ────────────────────────────────────────────────────────────
+FB_PAGE_ACCESS_TOKEN = os.environ.get("FB_PAGE_ACCESS_TOKEN", "")
+FB_APP_SECRET = os.environ.get("FB_APP_SECRET", "")
+FB_VERIFY_TOKEN = os.environ.get("FB_VERIFY_TOKEN", "trpbeauty_verify_2024")
+FB_GRAPH_URL = "https://graph.facebook.com/v19.0"
 
 # ─── Knowledge Base ─────────────────────────────────────────────────────────────
 KNOWLEDGE_BASE_PATH = "knowledge_base.md"
@@ -217,3 +228,126 @@ def handle_message(event: MessageEvent):
     # ─── ตอบปกติ ─────────────────────────────────────────────────────────────
     reply_text = ask_claude(user_id, user_text)
     send_reply(event.reply_token, reply_text)
+
+
+# ════════════════════════════════════════════════════════════════════════════════
+# FACEBOOK MESSENGER + COMMENT AUTO-REPLY
+# ════════════════════════════════════════════════════════════════════════════════
+
+def verify_fb_signature(body: bytes, signature_header: str) -> bool:
+    """ตรวจสอบว่า request มาจาก Facebook จริง"""
+    if not FB_APP_SECRET or not signature_header:
+        return True  # ถ้าไม่ได้ตั้ง secret ให้ผ่านไปก่อน (dev mode)
+    expected = "sha256=" + hmac.new(
+        FB_APP_SECRET.encode("utf-8"), body, hashlib.sha256
+    ).hexdigest()
+    return hmac.compare_digest(expected, signature_header)
+
+
+def fb_send_message(recipient_id: str, text: str):
+    """ส่งข้อความผ่าน Messenger Send API"""
+    if not FB_PAGE_ACCESS_TOKEN:
+        print("[FB] FB_PAGE_ACCESS_TOKEN ยังไม่ได้ตั้งค่า")
+        return
+    with httpx.Client() as client:
+        r = client.post(
+            f"{FB_GRAPH_URL}/me/messages",
+            params={"access_token": FB_PAGE_ACCESS_TOKEN},
+            json={
+                "recipient": {"id": recipient_id},
+                "message": {"text": text},
+                "messaging_type": "RESPONSE",
+            },
+            timeout=10,
+        )
+    if r.status_code != 200:
+        print(f"[FB] send_message error: {r.status_code} {r.text}")
+
+
+def fb_reply_comment(comment_id: str, text: str):
+    """ตอบ Comment บน Facebook Page"""
+    if not FB_PAGE_ACCESS_TOKEN:
+        print("[FB] FB_PAGE_ACCESS_TOKEN ยังไม่ได้ตั้งค่า")
+        return
+    with httpx.Client() as client:
+        r = client.post(
+            f"{FB_GRAPH_URL}/{comment_id}/comments",
+            params={"access_token": FB_PAGE_ACCESS_TOKEN},
+            json={"message": text},
+            timeout=10,
+        )
+    if r.status_code != 200:
+        print(f"[FB] reply_comment error: {r.status_code} {r.text}")
+
+
+@app.get("/facebook/webhook")
+async def fb_webhook_verify(request: Request):
+    """Facebook webhook verification (GET)"""
+    params = request.query_params
+    mode = params.get("hub.mode")
+    token = params.get("hub.verify_token")
+    challenge = params.get("hub.challenge")
+
+    if mode == "subscribe" and token == FB_VERIFY_TOKEN:
+        print("[FB] Webhook verified!")
+        return PlainTextResponse(challenge)
+    raise HTTPException(status_code=403, detail="Verification failed")
+
+
+@app.post("/facebook/webhook")
+async def fb_webhook(request: Request):
+    """รับ event จาก Facebook (Messenger + Comments)"""
+    signature = request.headers.get("X-Hub-Signature-256", "")
+    body = await request.body()
+
+    if not verify_fb_signature(body, signature):
+        raise HTTPException(status_code=403, detail="Invalid signature")
+
+    if not bot_enabled:
+        return {"status": "bot paused"}
+
+    data = json.loads(body)
+    if data.get("object") not in ("page", "instagram"):
+        return {"status": "not a page event"}
+
+    for entry in data.get("entry", []):
+        # ─── Messenger Messages ─────────────────────────────────────────────
+        for msg_event in entry.get("messaging", []):
+            sender_id = msg_event.get("sender", {}).get("id")
+            msg = msg_event.get("message", {})
+            text = msg.get("text", "").strip()
+
+            # ข้ามถ้าเป็นข้อความที่ bot ส่งเอง (echo)
+            if msg.get("is_echo") or not text or not sender_id:
+                continue
+
+            print(f"[FB Messenger] {sender_id}: {text[:30]}")
+            reply = ask_claude(f"fb_{sender_id}", text)
+            fb_send_message(sender_id, reply)
+
+        # ─── Page Feed (Comments) ───────────────────────────────────────────
+        for change in entry.get("changes", []):
+            if change.get("field") != "feed":
+                continue
+            val = change.get("value", {})
+            item = val.get("item", "")
+            verb = val.get("verb", "")
+
+            # ตอบเฉพาะ comment ใหม่ (ไม่ตอบ like / share / post ฯลฯ)
+            if item != "comment" or verb != "add":
+                continue
+
+            comment_id = val.get("comment_id", "")
+            comment_text = val.get("message", "").strip()
+            commenter_id = val.get("sender_id", "")
+
+            # ข้าม comment ที่ Page ส่งเอง
+            page_id = entry.get("id", "")
+            if str(commenter_id) == str(page_id) or not comment_text:
+                continue
+
+            print(f"[FB Comment] {commenter_id}: {comment_text[:30]}")
+            reply = ask_claude(f"fb_comment_{commenter_id}", comment_text)
+            fb_reply_comment(comment_id, reply)
+
+    return {"status": "ok"}
